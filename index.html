@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Реестр по сотруднику — авто‑распознавание и печать</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+@media print {
+  @page { size: A4; margin: 14mm; }
+  .max-w-6xl > :not(#reportWrap) { display: none !important; }
+  #reportWrap { margin: 0 !important; }
+  #reportWrap .bg-white { box-shadow: none !important; border: 0 !important; }
+
+  .report-table { border-collapse: collapse !important; font-size: 12pt; table-layout: fixed !important; width: 100% !important; }
+  .report-table th, .report-table td { border: 1px solid #000 !important; padding: 6px 8px !important; }
+
+  /* Скрываем только нумерацию в thead/tbody */
+  .report-table thead th:first-child,
+  .report-table tbody td:first-child { display: none !important; }
+
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: #fff; }
+}
+
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="max-w-6xl mx-auto p-4 md:p-8">
+    <h1 class="text-2xl md:text-3xl font-bold mb-1">Реестр событий сотрудников</h1>
+    <p class="text-gray-600 mb-6">Загрузите реестр (XLSX/CSV). Колонки определяются автоматически. Выберите сотрудника и период, затем распечатайте отчёт.</p>
+
+    <!-- Controls -->
+    <div id="controls" class="rounded-2xl bg-white shadow p-4 md:p-6 space-y-4">
+      <div class="flex flex-col md:flex-row gap-3 md:items-end">
+        <div class="grow">
+          <label class="block text-sm font-medium mb-1">Загрузка реестра (XLSX/CSV)</label>
+          <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" class="block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">Период: с</label>
+          <input id="dateFrom" type="date" class="w-full border rounded-lg px-3 py-2" />
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">по</label>
+          <input id="dateTo" type="date" class="w-full border rounded-lg px-3 py-2" />
+        </div>
+        <div class="grow">
+          <label class="block text-sm font-medium mb-1">Сотрудник</label>
+          <select id="employeeSelect" class="w-full border rounded-lg px-3 py-2 disabled:bg-gray-100" disabled>
+            <option>Загрузите файл…</option>
+          </select>
+        </div>
+        <div class="flex gap-2">
+          <button id="btnPrint" class="px-4 py-2 rounded-xl bg-black text-white disabled:opacity-40" disabled>Печать</button>
+        </div>
+      </div>
+      <div id="detectedCols" class="text-xs text-gray-500"></div>
+    </div>
+
+    <!-- Report -->
+    <div id="reportWrap" class="mt-6 print-container hidden">
+      <div class="bg-white rounded-2xl shadow p-6">
+        <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-2 mb-4">
+          <div>
+            <h2 class="text-xl font-bold">Реестр по сотруднику</h2>
+            <div id="repFio" class="text-lg"></div>
+          </div>
+          <div class="text-sm text-gray-600">
+            <div>Период: <span id="repPeriod">—</span></div>
+            <div>Сформировано: <span id="repGenerated"></span></div>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full border border-gray-200 report-table">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="border p-2 text-left">#</th>
+                <th class="border p-2 text-left">Дата</th>
+                <th class="border p-2 text-left">Начало</th>
+                <th class="border p-2 text-left">Окончание</th>
+                <th class="border p-2 text-left">Событие</th>
+                <th class="border p-2 text-right">Часы</th>
+              </tr>
+            </thead>
+            <tbody id="repTbody"></tbody>
+<tfoot>
+  <tr>
+    <td colspan="4" class="border p-2 text-right font-semibold">Итого часов:</td>
+    <td id="repTotal" class="border p-2 text-right font-bold">0</td>
+  </tr>
+</tfoot>
+
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="fixed bottom-4 right-4 hidden"></div>
+  </div>
+
+  <script>
+
+function readSmart(ws){
+  const rows = XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:true});
+  if(!rows.length) return {headers:[], data:[]};
+
+  const norm = s => String(s||'').replace(/\n+/g,' ').replace(/[\u00A0]/g,' ').replace(/\s+/g,' ').trim();
+
+  // Оценка «похожести» строки на шапку
+  const score = (r)=>{
+    const arr=(r||[]).map(norm).filter(Boolean);
+    let s=0;
+    const rx=[/фио|сотруд|name|employee/i, /дата/i, /событ|причин|event|desc/i];
+    rx.forEach(re=>{ if(arr.some(c=>re.test(c))) s++; });
+    s -= arr.filter(c=>/^__empty/i.test(c)).length*0.2;
+    return s;
+  };
+
+  // Находим лучшую строку для заголовков и склеиваем её с предыдущей (на случай многострочности)
+  let best=0, bestScore=-1; const maxScan=Math.min(rows.length,40);
+  for(let i=0;i<maxScan;i++){ const sc=score(rows[i]); if(sc>bestScore){best=i;bestScore=sc;} }
+
+  const head=rows[best]||[], prev=rows[Math.max(0,best-1)]||[];
+  const width=Math.max(head.length,prev.length);
+  const headers=[];
+  for(let c=0;c<width;c++){
+    const a=norm(prev[c]), b=norm(head[c]);
+    headers.push((a&&b?`${a} ${b}`:(a||b)) || `Col_${c+1}`);
+  }
+
+  const data=[];
+  for(let r=best+1;r<rows.length;r++){
+    const row=rows[r]; if(!row || row.every(v=>norm(v)==='')) continue;
+    const obj={}; headers.forEach((h,i)=> obj[h]=row[i] ?? ''); data.push(obj);
+  }
+  return {headers, data};
+}
+
+    let rawRows = [];
+    let headers = [];
+    let cols = {};
+
+    // ===== Утилиты
+    function showToast(msg, type = 'ok') {
+      const t = document.getElementById('toast');
+      t.className = 'fixed bottom-4 right-4 px-4 py-2 rounded-xl shadow text-white ' + (type === 'ok' ? 'bg-emerald-600' : 'bg-rose-600');
+      t.textContent = msg;
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 2400);
+    }
+
+function formatDurationRu(ms) {
+  if (!ms || ms <= 0) return '0 мин';
+  const totalSec = Math.round(ms / 1000);
+  const days  = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins  = Math.floor((totalSec % 3600) / 60);
+
+  const parts = [];
+  if (days  > 0) parts.push(`${days}\u00A0дн`);
+  if (hours > 0) parts.push(`${hours}\u00A0ч`);
+  if (mins  > 0) parts.push(`${mins}\u00A0мин`);
+
+  return parts.join(' ');
+}
+
+
+    function excelDateToJS(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+
+  // Числовой excel-сериал -> ЛОКАЛЬНАЯ дата/время (без сдвига)
+  if (typeof v === 'number') {
+    try {
+      // Точный разбор через SSF (есть в xlsx.full)
+      if (XLSX && XLSX.SSF && XLSX.SSF.parse_date_code) {
+        const o = XLSX.SSF.parse_date_code(v);
+        if (o) return new Date(o.y, (o.m || 1) - 1, o.d || 1, o.H || 0, o.M || 0, Math.floor(o.S || 0));
+      }
+    } catch(_) {}
+    // Фоллбек: локальная «эпоха» без UTC
+    const epochLocal = new Date(1899, 11, 30); // 1899-12-30
+    return new Date(epochLocal.getTime() + v * 86400000);
+  }
+
+  // Поддержка строк "ДД.ММ.ГГГГ[ ЧЧ:ММ[:СС]]" / "ДД.ММ.ГГ"
+  const s = String(v).trim();
+  const m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    let year = parseInt(m[3], 10); if (year < 100) year += 2000;
+    return new Date(year, parseInt(m[2],10)-1, parseInt(m[1],10),
+                    parseInt(m[4]||'0',10), parseInt(m[5]||'0',10), parseInt(m[6]||'0',10));
+  }
+
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+
+    function fmtDate(d){ if(!d) return ''; return `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`; }
+    function fmtTime(d){ if(!d) return ''; return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
+    function parseTime(val){
+      if(!val) return null; if(val instanceof Date) return val;
+      if(typeof val==='number'){ const base=new Date(); base.setHours(0,0,0,0); return new Date(base.getTime()+val*86400000); }
+      const s=String(val).trim(); const m=s.match(/^(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?$/);
+      if(m){ const h=+m[1]||0, mi=+m[2]||0, se=+m[3]||0; const base=new Date(); base.setHours(h,mi,se,0); return base; }
+      const d=new Date(s); return isNaN(d)?null:d;
+    }
+    function diffHours(st,en){ if(!st||!en) return 0; return Math.max(0, Math.round(((en-st)/36e5)*100)/100); }
+
+    // Парсер длительности "0 дней 7 часов 0 минут" (+ HH:MM(:SS), числа/Excel)
+    function parseDurationMs(val){
+      if(val==null) return 0;
+      if(typeof val==='number'){ return val<=1.5 ? Math.round(val*24*3600*1000) : Math.round(val*3600*1000); }
+      const s = String(val).toLowerCase().trim();
+      const pick = (re)=>{ const m=s.match(re); return m?parseInt(m[1],10)||0:0; };
+      const days=pick(/(\d+)\s*(дн(?:ей|я)?|day[s]?)/); const hours=pick(/(\d+)\s*(час(?:ов|а)?|h(?:our)?s?)/); const mins=pick(/(\d+)\s*(минут(?:а|ы)?|мин|m(?:in)?s?)/); const secs=pick(/(\d+)\s*(секунд(?:а|ы)?|сек|s(?:ec)?s?)/);
+      let ms = (((days*24+hours)*60+mins)*60+secs)*1000;
+      if(ms>0) return ms;
+      const hm = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+      if(hm){ const h=+hm[1]||0, m=+hm[2]||0, se=+(hm[3]||0); return ((h*60+m)*60+se)*1000; }
+      const n = Number(s); if(!isNaN(n)) return Math.round(n*3600*1000);
+      return 0;
+    }
+
+    function withinPeriod(d){
+      const f = document.getElementById('dateFrom').value ? new Date(document.getElementById('dateFrom').value) : null;
+      const t = document.getElementById('dateTo').value ? new Date(document.getElementById('dateTo').value) : null;
+      if(!d) return false; const day=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+      if(f && day < f) return false; if(t && day > t) return false; return true;
+    }
+
+    // ===== Поиск колонок по синонимам =====
+    function detectColumns(headers){
+      const norm = s => String(s||'').toLowerCase().replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim();
+      const find = (cands)=>{
+        for(const c of cands){ const hit=headers.find(h=>norm(h)===norm(c)); if(hit) return hit; }
+        const keys=[...cands].sort((a,b)=>b.length-a.length).map(norm);
+        for(const h of headers){ const nh=norm(h); if(keys.some(k=>nh.includes(k))) return h; }
+        return null;
+      };
+      const res = {
+        fio:       find(['ФИО','Сотрудник','ФИО сотрудника','Фамилия Имя','Фамилия, имя и отчество','Name','Employee','Full Name']),
+        event:     find(['Событие','Причина','Тип события','Описание','Комментарий','Event','Reason','Description']),
+        date:      find(['Дата и время','Дата','Дата создания','Date','Created','Creation Date']),
+        startDate: find(['Дата начала','Start Date','Начало (дата)']),
+        startTime: find(['Время начала','Начало','Start','Start Time']),
+        endDate:   find(['Дата завершения','End Date','Окончание (дата)']),
+        endTime:   find(['Время завершения','Окончание','End','End Time','Finish']),
+        hours:     find(['Итоговое количество времени','Количество времени','Часы','Длительность','Продолжительность','Hours','Duration'])
+      };
+      res.start = res.startTime; // для совместимости
+      res.end   = res.endTime;
+      return res;
+    }
+
+    // ===== Рендер отчёта =====
+    function buildReport(fioVal){
+      if(!fioVal || !(cols.fio) || !(cols.date || cols.startDate)) return;
+      let rows = rawRows.filter(r => String(r[cols.fio]||'').trim() === fioVal)
+.map(r => {
+  // 1) Базовый старт: "Дата и время"
+  let startDate = cols.date ? excelDateToJS(r[cols.date]) : null;
+
+  // 2) Если нет — собираем из "Дата начала" + "Время начала"
+  if (!startDate && (cols.startDate || cols.startTime)) {
+    const dOnly = cols.startDate ? excelDateToJS(r[cols.startDate]) : null;
+    const tOnly = cols.startTime ? parseTime(r[cols.startTime]) : null;
+    if (dOnly || tOnly) {
+      const d = dOnly
+        ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
+        : new Date();
+      if (tOnly) d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
+      startDate = d;
+    }
+  }
+
+  let st = startDate;
+  let en = null;
+
+  // 3) Пытаемся взять длительность из колонки "Итоговое количество времени"
+  const rawDur = (cols.hours != null) ? r[cols.hours] : null;
+  let durMs = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
+
+  // 4) Если есть старт и длительность — считаем окончание
+  if (st && durMs > 0) {
+    en = new Date(st.getTime() + durMs);
+  } else {
+    // 5) Иначе пробуем собрать окончание по отдельным колонкам
+    if (cols.startTime && !st) st = parseTime(r[cols.startTime]) || st;
+
+    if (cols.endTime) en = parseTime(r[cols.endTime]) || en;
+
+    if (cols.endDate && en instanceof Date) {
+      const dEnd = excelDateToJS(r[cols.endDate]);
+      if (dEnd) {
+        en = new Date(
+          dEnd.getFullYear(), dEnd.getMonth(), dEnd.getDate(),
+          en.getHours(), en.getMinutes(), en.getSeconds(), 0
+        );
+      }
+    }
+  }
+
+  // 6) Часы в десятичном виде для суммирования
+  let hoursNum = 0;
+  if (durMs > 0) {
+    hoursNum = Math.round((durMs / 36e5) * 100) / 100; // ms -> hours (2 знака)
+  } else if (st && en) {
+    hoursNum = diffHours(st, en);
+    durMs = Math.round(hoursNum * 3600000); // чтобы отформатировать текстом
+  }
+
+  // 7) Текст для отображения — всегда своим форматтером (без "0 дней")
+  const hoursText = formatDurationRu(durMs);
+
+return {
+  date: startDate,
+  start: st,
+  end: en,
+  event: r[cols.event] || '',
+  hours: hoursNum,          // десятичные часы (для справки)
+  hoursText,                // "5 ч 15 мин"
+  durMs                     // ← сумма в ms для точного "Итого"
+};
+})
+
+// фильтрация по периоду
+rows = rows.filter(r => withinPeriod(r.date));
+
+// сортировка: по дате, затем по времени начала
+rows.sort((a, b) => (a.date - b.date) || ((a.start?.getTime() || 0) - (b.start?.getTime() || 0)));
+
+const tbody = document.getElementById('repTbody');
+tbody.innerHTML = '';
+
+let totalMs = 0;
+
+rows.forEach((r, i) => {
+  // накапливаем точную длительность в миллисекундах
+  const itemMs = (typeof r.durMs === 'number' && r.durMs > 0)
+    ? r.durMs
+    : Math.round((r.hours || 0) * 3600000);
+  totalMs += itemMs;
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td class="border p-2">${i + 1}</td>
+    <td class="border p-2">${fmtDate(r.date)}</td>
+    <td class="border p-2">${fmtTime(r.start)}</td>
+    <td class="border p-2">${fmtTime(r.end)}</td>
+    <td class="border p-2">${r.event}</td>
+    <td class="border p-2 text-right" title="${(itemMs / 36e5).toFixed(2)} ч">${r.hoursText}</td>
+  `;
+  tbody.appendChild(tr);
+});
+
+// Итого: человекочитаемо + tooltip с десятичными часами
+const totalCell = document.getElementById('repTotal');
+totalCell.textContent = formatDurationRu(totalMs);    // например: "18 ч 15 мин"
+totalCell.title = (totalMs / 36e5).toFixed(2) + ' ч'; // tooltip: "18.25 ч"
+
+// Прочее оформление
+document.getElementById('repFio').textContent = fioVal;
+const df = document.getElementById('dateFrom').value;
+const dt = document.getElementById('dateTo').value;
+document.getElementById('repPeriod').textContent = (df && dt) ? `${df} — ${dt}` : (df || dt || 'все даты');
+document.getElementById('repGenerated').textContent = fmtDate(new Date());
+document.getElementById('reportWrap').classList.remove('hidden');
+
+    }
+
+    // ===== Загрузка файла
+    document.getElementById('fileInput').addEventListener('change', async (e)=>{
+      const file=e.target.files[0]; if(!file) return;
+      try{
+        const data=await file.arrayBuffer();
+const wb=XLSX.read(data,{type:'array'});
+const ws=wb.Sheets[wb.SheetNames[0]];
+const smart = readSmart(ws);
+rawRows = smart.data;
+headers = smart.headers;
+if(!rawRows.length) throw new Error('Пустой лист или сложная шапка не распознана.');
+
+        cols = detectColumns(headers);
+        const det=document.getElementById('detectedCols');
+        det.innerHTML = 'Опознаны колонки: ' + [
+          `ФИО: <b>${cols.fio||'—'}</b>`,
+          `Событие: <b>${cols.event||'—'}</b>`,
+          `Дата/время: <b>${cols.date||'—'}</b>`,
+          `Старт‑дата: <b>${cols.startDate||'—'}</b>`,
+          `Старт‑время: <b>${cols.startTime||'—'}</b>`,
+          `Финиш‑дата: <b>${cols.endDate||'—'}</b>`,
+          `Финиш‑время: <b>${cols.endTime||'—'}</b>`,
+          `Длительность: <b>${cols.hours||'—'}</b>`
+        ].join(' · ');
+
+        if(!cols.fio){ showToast('Не нашёл колонку ФИО/Сотрудник — проверьте шапку файла.','err'); return; }
+        if(!(cols.date || cols.startDate)){ showToast('Не нашёл «Дата и время» или «Дата начала».','err'); return; }
+
+        // Список сотрудников
+        const uniq=[...new Set(rawRows.map(r=>String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim()).filter(Boolean))]
+                    .sort((a,b)=>a.localeCompare(b,'ru'));
+        const sel=document.getElementById('employeeSelect'); sel.innerHTML='<option value="">— выберите —</option>'; uniq.forEach(v=> sel.appendChild(new Option(v,v)) );
+        sel.disabled=false; document.getElementById('btnPrint').disabled=false;
+        showToast('Файл загружен, выберите сотрудника.');
+      }catch(err){ console.error(err); showToast('Ошибка: '+err.message,'err'); }
+    });
+
+    document.getElementById('employeeSelect').addEventListener('change',e=>buildReport(e.target.value));
+    document.getElementById('dateFrom').addEventListener('change',()=>buildReport(document.getElementById('employeeSelect').value));
+    document.getElementById('dateTo').addEventListener('change',()=>buildReport(document.getElementById('employeeSelect').value));
+    document.getElementById('btnPrint').addEventListener('click',()=>{ if(!document.getElementById('reportWrap').classList.contains('hidden')) window.print(); });
+  </script>
+</body>
+</html>
