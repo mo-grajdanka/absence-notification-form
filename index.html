@@ -14,7 +14,6 @@
   .report-table thead th:first-child,
   .report-table tbody td:first-child { display: none !important; }
 #reportWrap { display: block !important; margin: 0 !important; }
-  /* на печати показываем печатный итог, экранный прячем */
   .sum-screen { display: none !important; }
   .sum-print  { display: table-row !important; }
 }
@@ -152,6 +151,14 @@ function readSmart(ws){
       t.style.display = 'block';
       setTimeout(() => t.style.display = 'none', 2400);
     }
+
+    function getPickerDateLocal(id) {
+  const v = document.getElementById(id)?.value || '';
+  if (!v) return null;               // v = 'YYYY-MM-DD'
+  const [y, m, d] = v.split('-').map(Number);
+  return new Date(y, (m || 1) - 1, d || 1, 0, 0, 0, 0); // ЛОКАЛЬНАЯ полуночь
+}
+
 
     function resetReport() {
   // данные
@@ -325,12 +332,19 @@ function formatDurationRu(ms) {
 }
 
 
-    function withinPeriod(d){
-      const f = document.getElementById('dateFrom').value ? new Date(document.getElementById('dateFrom').value) : null;
-      const t = document.getElementById('dateTo').value ? new Date(document.getElementById('dateTo').value) : null;
-      if(!d) return false; const day=new Date(d.getFullYear(),d.getMonth(),d.getDate());
-      if(f && day < f) return false; if(t && day > t) return false; return true;
-    }
+    function withinPeriod(d) {
+  if (!d) return false;
+
+  const f = getPickerDateLocal('dateFrom'); // начало периода (local)
+  const t = getPickerDateLocal('dateTo');   // конец периода (local)
+
+  // сравниваем только по дате (локальная полночь)
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+
+  if (f && day < f) return false;  // ВКЛЮЧИТЕЛЬНО: day === f проходит
+  if (t && day > t) return false;  // ВКЛЮЧИТЕЛЬНО: day === t проходит
+  return true;
+}
 
     // ===== Поиск колонок по синонимам =====
     function detectColumns(headers){
