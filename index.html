@@ -7,31 +7,27 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
+.sum-print { display: none; }
+
 @media print {
-  @page { size: A4; margin: 14mm; }
-  .max-w-6xl > :not(#reportWrap) { display: none !important; }
-  #reportWrap { margin: 0 !important; }
-  #reportWrap .bg-white { box-shadow: none !important; border: 0 !important; }
-
-  .report-table { border-collapse: collapse !important; font-size: 12pt; table-layout: fixed !important; width: 100% !important; }
-  .report-table th, .report-table td { border: 1px solid #000 !important; padding: 6px 8px !important; }
-
-  /* Скрываем только нумерацию в thead/tbody */
+  .no-print, .no-print * { display: none !important; }
   .report-table thead th:first-child,
   .report-table tbody td:first-child { display: none !important; }
-
-  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background: #fff; }
+#reportWrap { display: block !important; margin: 0 !important; }
+  /* на печати показываем печатный итог, экранный прячем */
+  .sum-screen { display: none !important; }
+  .sum-print  { display: table-row !important; }
 }
 
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
   <div class="max-w-6xl mx-auto p-4 md:p-8">
-    <h1 class="text-2xl md:text-3xl font-bold mb-1">Реестр событий сотрудников</h1>
-    <p class="text-gray-600 mb-6">Загрузите реестр (XLSX/CSV). Колонки определяются автоматически. Выберите сотрудника и период, затем распечатайте отчёт.</p>
+    <h1 class="text-2xl md:text-3xl font-bold mb-1 no-print">Реестр событий сотрудников</h1>
+    <p class="text-gray-600 mb-6 no-print">Загрузите реестр (XLSX/CSV). Колонки определяются автоматически. Выберите сотрудника и период, затем распечатайте отчёт.</p>
 
     <!-- Controls -->
-    <div id="controls" class="rounded-2xl bg-white shadow p-4 md:p-6 space-y-4">
+    <div id="controls" class="rounded-2xl bg-white shadow p-4 md:p-6 space-y-4 no-print">
       <div class="flex flex-col md:flex-row gap-3 md:items-end">
         <div class="grow">
           <label class="block text-sm font-medium mb-1">Загрузка реестра (XLSX/CSV)</label>
@@ -55,7 +51,7 @@
           <button id="btnPrint" class="px-4 py-2 rounded-xl bg-black text-white disabled:opacity-40" disabled>Печать</button>
         </div>
       </div>
-      <div id="detectedCols" class="text-xs text-gray-500"></div>
+      <div id="detectedCols" class="text-xs text-gray-500 no-print"></div>
     </div>
 
     <!-- Report -->
@@ -85,9 +81,16 @@
             </thead>
             <tbody id="repTbody"></tbody>
 <tfoot>
-  <tr>
+  <!-- Экран: 6 колонок -->
+  <tr class="sum-screen">
+    <td colspan="5" class="border p-2 text-right font-semibold">Итого часов:</td>
+    <td id="repTotalScreen" class="border p-2 text-right font-bold">0</td>
+  </tr>
+
+  <!-- Печать: 5 колонок (колонка # скрыта в thead/tbody) -->
+  <tr class="sum-print">
     <td colspan="4" class="border p-2 text-right font-semibold">Итого часов:</td>
-    <td id="repTotal" class="border p-2 text-right font-bold">0</td>
+    <td id="repTotalPrint" class="border p-2 text-right font-bold">0</td>
   </tr>
 </tfoot>
 
@@ -136,7 +139,7 @@ function readSmart(ws){
   }
   return {headers, data};
 }
-
+    let records = [];
     let rawRows = [];
     let headers = [];
     let cols = {};
@@ -149,6 +152,50 @@ function readSmart(ws){
       t.style.display = 'block';
       setTimeout(() => t.style.display = 'none', 2400);
     }
+
+    function resetReport() {
+  // данные
+  records = [];
+  rawRows = [];
+  headers = [];
+  cols = {};
+
+  // фильтры/селекты
+  const sel = document.getElementById('employeeSelect');
+  if (sel) {
+    sel.innerHTML = '<option value="">— выберите —</option>';
+    sel.disabled = true;
+  }
+
+  // таблица
+  const tbody = document.getElementById('repTbody');
+  if (tbody) tbody.innerHTML = '';
+
+  // «Итого»
+  const tScreen = document.getElementById('repTotalScreen');
+  const tPrint  = document.getElementById('repTotalPrint');
+  if (tScreen) { tScreen.textContent = '0'; tScreen.removeAttribute('title'); }
+  if (tPrint)  { tPrint.textContent  = '0'; tPrint.removeAttribute('title'); }
+
+  // шапка отчёта
+  const repFio = document.getElementById('repFio');
+  const repPeriod = document.getElementById('repPeriod');
+  const repGenerated = document.getElementById('repGenerated');
+  if (repFio) repFio.textContent = '';
+  if (repPeriod) repPeriod.textContent = '—';
+  if (repGenerated) repGenerated.textContent = '';
+
+  // скрыть блок отчёта и запретить печать
+  const wrap = document.getElementById('reportWrap');
+  if (wrap) wrap.classList.add('hidden');
+  const btnPrint = document.getElementById('btnPrint');
+  if (btnPrint) btnPrint.disabled = true;
+
+  // инфо по колонкам
+  const det = document.getElementById('detectedCols');
+  if (det) det.textContent = '';
+}
+
 
 function formatDurationRu(ms) {
   if (!ms || ms <= 0) return '0 мин';
@@ -223,6 +270,61 @@ function formatDurationRu(ms) {
       return 0;
     }
 
+    function normalizeRecord(r, idx) {
+  // 1) базовый старт: "Дата и время"
+  let start = cols.date ? excelDateToJS(r[cols.date]) : null;
+
+  // 2) если нет – собрать из "Дата начала" + "Время начала"
+  if (!start && (cols.startDate || cols.startTime)) {
+    const dOnly = cols.startDate ? excelDateToJS(r[cols.startDate]) : null;
+    const tOnly = cols.startTime ? parseTime(r[cols.startTime]) : null;
+    if (dOnly || tOnly) {
+      const d = dOnly
+        ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
+        : new Date();
+      if (tOnly) d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
+      start = d;
+    }
+  }
+
+  // 3) длительность из "Итоговое количество времени"
+  const rawDur = (cols.hours != null) ? r[cols.hours] : null;
+  let durMs = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
+
+  // 4) окончание
+  let end = null;
+  if (start && durMs > 0) {
+    end = new Date(start.getTime() + durMs);
+  } else {
+    if (cols.startTime && !start) start = parseTime(r[cols.startTime]) || start;
+    if (cols.endTime) end = parseTime(r[cols.endTime]) || end;
+    if (cols.endDate && end instanceof Date) {
+      const dEnd = excelDateToJS(r[cols.endDate]);
+      if (dEnd) end = new Date(dEnd.getFullYear(), dEnd.getMonth(), dEnd.getDate(), end.getHours(), end.getMinutes(), end.getSeconds(), 0);
+    }
+    if (!durMs && start && end) {
+      durMs = Math.max(0, Math.round((end - start))); // точная длительность
+    }
+  }
+
+  // 5) итоговые поля
+  const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
+  const event = r[cols.event] || '';
+  const hoursText = formatDurationRu(durMs);
+
+  return {
+    id: String(idx + 1),
+    fio,
+    event,
+    start: start || null,
+    end: end || null,
+    durMs: durMs || 0,
+    hoursText,                 // "5 ч 15 мин"
+    source: r                  // опционально: исходная строка
+  };
+}
+
+
     function withinPeriod(d){
       const f = document.getElementById('dateFrom').value ? new Date(document.getElementById('dateFrom').value) : null;
       const t = document.getElementById('dateTo').value ? new Date(document.getElementById('dateTo').value) : null;
@@ -255,125 +357,70 @@ function formatDurationRu(ms) {
     }
 
     // ===== Рендер отчёта =====
-    function buildReport(fioVal){
-      if(!fioVal || !(cols.fio) || !(cols.date || cols.startDate)) return;
-      let rows = rawRows.filter(r => String(r[cols.fio]||'').trim() === fioVal)
-.map(r => {
-  // 1) Базовый старт: "Дата и время"
-  let startDate = cols.date ? excelDateToJS(r[cols.date]) : null;
+function buildReport(fioVal){
+  if(!fioVal) return;
 
-  // 2) Если нет — собираем из "Дата начала" + "Время начала"
-  if (!startDate && (cols.startDate || cols.startTime)) {
-    const dOnly = cols.startDate ? excelDateToJS(r[cols.startDate]) : null;
-    const tOnly = cols.startTime ? parseTime(r[cols.startTime]) : null;
-    if (dOnly || tOnly) {
-      const d = dOnly
-        ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
-        : new Date();
-      if (tOnly) d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
-      startDate = d;
-    }
-  }
+  // фильтр по сотруднику и периоду
+  let rows = records
+    .filter(rec => rec.fio === fioVal)
+    .filter(rec => withinPeriod(rec.start || rec.end || null));
 
-  let st = startDate;
-  let en = null;
+  // сортировка
+  rows.sort((a,b)=>{
+    const ad = (a.start || a.end || 0)?.getTime?.() || 0;
+    const bd = (b.start || b.end || 0)?.getTime?.() || 0;
+    return ad - bd;
+  });
 
-  // 3) Пытаемся взять длительность из колонки "Итоговое количество времени"
-  const rawDur = (cols.hours != null) ? r[cols.hours] : null;
-  let durMs = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
+  // рендер
+  const tbody = document.getElementById('repTbody');
+  tbody.innerHTML = '';
+  let totalMs = 0;
 
-  // 4) Если есть старт и длительность — считаем окончание
-  if (st && durMs > 0) {
-    en = new Date(st.getTime() + durMs);
-  } else {
-    // 5) Иначе пробуем собрать окончание по отдельным колонкам
-    if (cols.startTime && !st) st = parseTime(r[cols.startTime]) || st;
+  rows.forEach((r, i) => {
+    totalMs += (r.durMs || 0);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="border p-2">${i+1}</td>
+      <td class="border p-2">${fmtDate(r.start || r.end)}</td>
+      <td class="border p-2">${fmtTime(r.start)}</td>
+      <td class="border p-2">${fmtTime(r.end)}</td>
+      <td class="border p-2">${r.event}</td>
+      <td class="border p-2 text-right" title="${(r.durMs/36e5).toFixed(2)} ч">${r.hoursText}</td>
+    `;
+    tbody.appendChild(tr);
+  });
 
-    if (cols.endTime) en = parseTime(r[cols.endTime]) || en;
+  // ИТОГО (учитывает печать: colspan уже настроен в твоём tfoot)
+const totalText  = formatDurationRu(totalMs);
+const totalHours = (totalMs / 36e5).toFixed(2) + ' ч';
 
-    if (cols.endDate && en instanceof Date) {
-      const dEnd = excelDateToJS(r[cols.endDate]);
-      if (dEnd) {
-        en = new Date(
-          dEnd.getFullYear(), dEnd.getMonth(), dEnd.getDate(),
-          en.getHours(), en.getMinutes(), en.getSeconds(), 0
-        );
-      }
-    }
-  }
+const cellScreen = document.getElementById('repTotalScreen');
+const cellPrint  = document.getElementById('repTotalPrint');
+if (cellScreen) { cellScreen.textContent = totalText; cellScreen.title = totalHours; }
+if (cellPrint)  { cellPrint.textContent  = totalText; cellPrint.title  = totalHours; }
 
-  // 6) Часы в десятичном виде для суммирования
-  let hoursNum = 0;
-  if (durMs > 0) {
-    hoursNum = Math.round((durMs / 36e5) * 100) / 100; // ms -> hours (2 знака)
-  } else if (st && en) {
-    hoursNum = diffHours(st, en);
-    durMs = Math.round(hoursNum * 3600000); // чтобы отформатировать текстом
-  }
+  // если у тебя один футер:
+  const repTotal = document.getElementById('repTotal');
+  if (repTotal) { repTotal.textContent = totalText; repTotal.title = totalHours; }
 
-  // 7) Текст для отображения — всегда своим форматтером (без "0 дней")
-  const hoursText = formatDurationRu(durMs);
 
-return {
-  date: startDate,
-  start: st,
-  end: en,
-  event: r[cols.event] || '',
-  hours: hoursNum,          // десятичные часы (для справки)
-  hoursText,                // "5 ч 15 мин"
-  durMs                     // ← сумма в ms для точного "Итого"
-};
-})
 
-// фильтрация по периоду
-rows = rows.filter(r => withinPeriod(r.date));
+  // заголовки отчёта
+  document.getElementById('repFio').textContent = fioVal;
+  const df=document.getElementById('dateFrom').value;
+  const dt=document.getElementById('dateTo').value;
+  document.getElementById('repPeriod').textContent = (df && dt) ? `${df} — ${dt}` : (df || dt || 'все даты');
+  document.getElementById('repGenerated').textContent = fmtDate(new Date());
+  document.getElementById('reportWrap').classList.remove('hidden');
+}
 
-// сортировка: по дате, затем по времени начала
-rows.sort((a, b) => (a.date - b.date) || ((a.start?.getTime() || 0) - (b.start?.getTime() || 0)));
-
-const tbody = document.getElementById('repTbody');
-tbody.innerHTML = '';
-
-let totalMs = 0;
-
-rows.forEach((r, i) => {
-  // накапливаем точную длительность в миллисекундах
-  const itemMs = (typeof r.durMs === 'number' && r.durMs > 0)
-    ? r.durMs
-    : Math.round((r.hours || 0) * 3600000);
-  totalMs += itemMs;
-
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td class="border p-2">${i + 1}</td>
-    <td class="border p-2">${fmtDate(r.date)}</td>
-    <td class="border p-2">${fmtTime(r.start)}</td>
-    <td class="border p-2">${fmtTime(r.end)}</td>
-    <td class="border p-2">${r.event}</td>
-    <td class="border p-2 text-right" title="${(itemMs / 36e5).toFixed(2)} ч">${r.hoursText}</td>
-  `;
-  tbody.appendChild(tr);
-});
-
-// Итого: человекочитаемо + tooltip с десятичными часами
-const totalCell = document.getElementById('repTotal');
-totalCell.textContent = formatDurationRu(totalMs);    // например: "18 ч 15 мин"
-totalCell.title = (totalMs / 36e5).toFixed(2) + ' ч'; // tooltip: "18.25 ч"
-
-// Прочее оформление
-document.getElementById('repFio').textContent = fioVal;
-const df = document.getElementById('dateFrom').value;
-const dt = document.getElementById('dateTo').value;
-document.getElementById('repPeriod').textContent = (df && dt) ? `${df} — ${dt}` : (df || dt || 'все даты');
-document.getElementById('repGenerated').textContent = fmtDate(new Date());
-document.getElementById('reportWrap').classList.remove('hidden');
-
-    }
 
     // ===== Загрузка файла
     document.getElementById('fileInput').addEventListener('change', async (e)=>{
       const file=e.target.files[0]; if(!file) return;
       try{
+        resetReport();
         const data=await file.arrayBuffer();
 const wb=XLSX.read(data,{type:'array'});
 const ws=wb.Sheets[wb.SheetNames[0]];
@@ -383,6 +430,19 @@ headers = smart.headers;
 if(!rawRows.length) throw new Error('Пустой лист или сложная шапка не распознана.');
 
         cols = detectColumns(headers);
+
+        // Нормализация всего листа в JSON-модель
+records = rawRows.map((r, i) => normalizeRecord(r, i));
+
+// Список сотрудников из records (а не из rawRows)
+const uniq = [...new Set(records.map(x => x.fio).filter(Boolean))]
+  .sort((a,b)=>a.localeCompare(b,'ru'));
+const sel = document.getElementById('employeeSelect');
+sel.innerHTML = '<option value="">— выберите —</option>';
+uniq.forEach(v => sel.appendChild(new Option(v, v)));
+sel.disabled = false;
+document.getElementById('btnPrint').disabled = false;
+
         const det=document.getElementById('detectedCols');
         det.innerHTML = 'Опознаны колонки: ' + [
           `ФИО: <b>${cols.fio||'—'}</b>`,
@@ -398,11 +458,6 @@ if(!rawRows.length) throw new Error('Пустой лист или сложная
         if(!cols.fio){ showToast('Не нашёл колонку ФИО/Сотрудник — проверьте шапку файла.','err'); return; }
         if(!(cols.date || cols.startDate)){ showToast('Не нашёл «Дата и время» или «Дата начала».','err'); return; }
 
-        // Список сотрудников
-        const uniq=[...new Set(rawRows.map(r=>String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim()).filter(Boolean))]
-                    .sort((a,b)=>a.localeCompare(b,'ru'));
-        const sel=document.getElementById('employeeSelect'); sel.innerHTML='<option value="">— выберите —</option>'; uniq.forEach(v=> sel.appendChild(new Option(v,v)) );
-        sel.disabled=false; document.getElementById('btnPrint').disabled=false;
         showToast('Файл загружен, выберите сотрудника.');
       }catch(err){ console.error(err); showToast('Ошибка: '+err.message,'err'); }
     });
