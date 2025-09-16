@@ -334,6 +334,20 @@ function lunchOverlapMs(start, end, lunchFrom = "13:00", lunchTo = "14:00") {
   return total;
 }
 
+ function endByWorkMs(start, workMs, lunchFrom = "13:00", lunchTo = "14:00") {
+  if (!(start instanceof Date) || !workMs || workMs <= 0) return null;
+
+  // итерационно учитываем, что добавление обеда удлиняет интервал
+  let end = new Date(start.getTime() + workMs);
+  for (let i = 0; i < 5; i++) { // обычно 1–2 итерации достаточно
+    const lunch = lunchOverlapMs(start, end, lunchFrom, lunchTo);
+    const need  = start.getTime() + workMs + lunch;
+    if (end.getTime() === need) break;
+    end = new Date(need);
+  }
+  return end;
+}   
+
 
 function normalizeRecord(r, idx) {
   // 1) базовый старт: "Дата и время"
@@ -370,31 +384,37 @@ function normalizeRecord(r, idx) {
   // 4) альтернативный источник — «Итоговое количество времени»
   const rawDur = (cols.hours != null) ? r[cols.hours] : null;
 
-  // 5) финальная длительность
+ // 5) финальная длительность
   let durMs = 0;
 
   if (start && end && end > start) {
-    // приоритет: считаем от/до и вычитаем обед(ы)
-    const base = end.getTime() - start.getTime();
-    const lunch = lunchOverlapMs(start, end, "13:00", "14:00");
+    // если заданы от/до — берём их и вычитаем обед
+    const base   = end.getTime() - start.getTime();
+    const lunch  = lunchOverlapMs(start, end, "13:00", "14:00");
     durMs = Math.max(0, base - lunch);
-  } else if (rawDur != null && String(rawDur).trim() !== '') {
-    // если времени начала/окончания нет — используем «Итоговое кол-во»
-    durMs = parseDurationMs(rawDur);
-    // НЕТ корректной возможности вычитать обед без start/end, поэтому оставляем как есть
+  } else {
+    // иначе пробуем «Итоговое количество времени»
+    const rawDur = (cols.hours != null) ? r[cols.hours] : null;
+    if (rawDur != null && String(rawDur).trim() !== '') {
+      durMs = parseDurationMs(rawDur); // это чистое рабочее время
+    }
   }
 
-  // 6) итоговые поля
+  // >>> ДОБАВЛЕНО: если конца нет, но есть начало и длительность — восстановим конец
+  if (!end && start && durMs > 0) {
+    end = endByWorkMs(start, durMs, "13:00", "14:00");
+  }
+
   const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
   const event = r[cols.event] || '';
-  const hoursText = formatDurationRu(durMs); // отображение строкой
+  const hoursText = formatDurationRu(durMs);
 
   return {
     id: String(idx + 1),
     fio,
     event,
     start: start || null,
-    end: end || null,
+    end: end || null,      // теперь конец будет заполнен, если это возможно
     durMs: durMs || 0,
     hoursText,
     source: r
@@ -574,6 +594,7 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
 
 
