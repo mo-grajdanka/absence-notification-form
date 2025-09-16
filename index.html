@@ -393,10 +393,9 @@ function endByWorkMsWindowed(start, workMs, dayStart="09:00", lunchFrom="13:00",
 
 
 function normalizeRecord(r, idx) {
-  // 1) базовый старт: "Дата и время"
+  // ---- 1) распарсить старт ----
   let start = cols.date ? excelDateToJS(r[cols.date]) : null;
 
-  // 2) если нет – собрать из "Дата начала" + "Время начала"
   if (!start && (cols.startDate || cols.startTime)) {
     const dOnly = cols.startDate ? excelDateToJS(r[cols.startDate]) : null;
     const tOnly = cols.startTime ? parseTime(r[cols.startTime]) : null;
@@ -409,10 +408,9 @@ function normalizeRecord(r, idx) {
     }
   }
 
-  // 3) конец по данным
+  // ---- 2) распарсить конец (если задан) ----
   let end = null;
   if (cols.endTime || cols.endDate) {
-    // если есть отдельные поля окончания — соберём
     const tOnly = cols.endTime ? parseTime(r[cols.endTime]) : null;
     const dOnly = cols.endDate ? excelDateToJS(r[cols.endDate]) : (start ? new Date(start) : null);
     if (tOnly || dOnly) {
@@ -424,27 +422,27 @@ function normalizeRecord(r, idx) {
     }
   }
 
-  // 4) альтернативный источник — «Итоговое количество времени»
+  // ---- 3) «Итоговое количество времени» (как число мс) ----
   const rawDur = (cols.hours != null) ? r[cols.hours] : null;
+  const durByRaw = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
 
- // 5) финальная длительность
+  // ---- 4) финальный расчёт по приоритетам ----
   let durMs = 0;
 
   if (start && end && end > start) {
-    // считаем ТОЛЬКО рабочие окна (09–13 и 14–18)
+    // приоритет №1: явные от/до → считаем ТОЛЬКО рабочие окна
     durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
+  } else if (start && durByRaw > 0) {
+    // приоритет №2: есть старт и «итоговое» → строим конец по рабочим окнам
+    end = endByWorkMsWindowed(start, durByRaw, "09:00", "13:00", "14:00", "18:00");
+    durMs = durByRaw;
   } else {
-    const rawDur = (cols.hours != null) ? r[cols.hours] : null;
-    if (rawDur != null && String(rawDur).trim() !== '') {
-      durMs = parseDurationMs(rawDur); // чистое рабочее время числом
-    }
+    // приоритет №3: только «итоговое»
+    durMs = durByRaw;
+    // end не восстанавливаем — данных мало
   }
 
-  // если конца нет, но есть начало и длительность — достраиваем end по рабочим окнам
-  if (!end && start && durMs > 0) {
-    end = endByWorkMsWindowed(start, durMs, "09:00", "13:00", "14:00", "18:00");
-  }
-
+  // ---- 5) возврат записи ----
   const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
   const event = r[cols.event] || '';
   const hoursText = formatDurationRu(durMs);
@@ -460,6 +458,7 @@ function normalizeRecord(r, idx) {
     source: r
   };
 }
+
 
 
 
@@ -634,6 +633,7 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
 
 
