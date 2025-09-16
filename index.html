@@ -346,7 +346,50 @@ function lunchOverlapMs(start, end, lunchFrom = "13:00", lunchTo = "14:00") {
     end = new Date(need);
   }
   return end;
-}   
+}
+
+    function overlapMs(aStart, aEnd, bStart, bEnd) {
+  const s = Math.max(aStart.getTime(), bStart.getTime());
+  const e = Math.min(aEnd.getTime(),   bEnd.getTime());
+  return Math.max(0, e - s);
+}
+
+function parseHM(s){ const [h,m]=String(s).split(':'); return [parseInt(h||'0',10), parseInt(m||'0',10)]; }
+
+function workOverlapMs(start, end, dayStart="09:00", lunchFrom="13:00", lunchTo="14:00", dayEnd="18:00"){
+  if(!(start instanceof Date) || !(end instanceof Date) || end <= start) return 0;
+  const [dsh,dsm] = parseHM(dayStart);
+  const [lfh,lfm] = parseHM(lunchFrom);
+  const [lth,ltm] = parseHM(lunchTo);
+  const [deh,dem] = parseHM(dayEnd);
+
+  let total = 0;
+  let dayCursor = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0,0,0,0);
+  while(dayCursor.getTime() <= end.getTime()){
+    const ds = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate(), dsh,dsm,0,0); // 09:00
+    const lf = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate(), lfh,lfm,0,0); // 13:00
+    const lt = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate(), lth,ltm,0,0); // 14:00
+    const de = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate(), deh,dem,0,0); // 18:00
+    total += overlapMs(start, end, ds, lf); // 09:00–13:00
+    total += overlapMs(start, end, lt, de); // 14:00–18:00
+    dayCursor = new Date(dayCursor.getTime() + 86400000);
+  }
+  return total;
+}
+
+// Найти минимальное end так, чтобы рабочее время = workMs (учитывая окна)
+function endByWorkMsWindowed(start, workMs, dayStart="09:00", lunchFrom="13:00", lunchTo="14:00", dayEnd="18:00"){
+  if(!(start instanceof Date) || !workMs || workMs<=0) return null;
+  let lo = start.getTime();
+  let hi = lo + workMs + 3*86400000; // запас до 3 суток
+  for(let i=0;i<35;i++){
+    const mid = new Date(lo + Math.floor((hi-lo)/2));
+    const w = workOverlapMs(start, mid, dayStart, lunchFrom, lunchTo, dayEnd);
+    if (w >= workMs) hi = mid.getTime(); else lo = mid.getTime()+1;
+  }
+  return new Date(hi);
+}
+
 
 
 function normalizeRecord(r, idx) {
@@ -388,21 +431,18 @@ function normalizeRecord(r, idx) {
   let durMs = 0;
 
   if (start && end && end > start) {
-    // если заданы от/до — берём их и вычитаем обед
-    const base   = end.getTime() - start.getTime();
-    const lunch  = lunchOverlapMs(start, end, "13:00", "14:00");
-    durMs = Math.max(0, base - lunch);
+    // считаем ТОЛЬКО рабочие окна (09–13 и 14–18)
+    durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
   } else {
-    // иначе пробуем «Итоговое количество времени»
     const rawDur = (cols.hours != null) ? r[cols.hours] : null;
     if (rawDur != null && String(rawDur).trim() !== '') {
-      durMs = parseDurationMs(rawDur); // это чистое рабочее время
+      durMs = parseDurationMs(rawDur); // чистое рабочее время числом
     }
   }
 
-  // >>> ДОБАВЛЕНО: если конца нет, но есть начало и длительность — восстановим конец
+  // если конца нет, но есть начало и длительность — достраиваем end по рабочим окнам
   if (!end && start && durMs > 0) {
-    end = endByWorkMs(start, durMs, "13:00", "14:00");
+    end = endByWorkMsWindowed(start, durMs, "09:00", "13:00", "14:00", "18:00");
   }
 
   const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
@@ -414,7 +454,7 @@ function normalizeRecord(r, idx) {
     fio,
     event,
     start: start || null,
-    end: end || null,      // теперь конец будет заполнен, если это возможно
+    end: end || null,
     durMs: durMs || 0,
     hoursText,
     source: r
@@ -594,6 +634,7 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
 
 
