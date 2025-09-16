@@ -299,7 +299,43 @@ function formatDurationWorkday(ms, WORKDAY_HOURS = 8) {
       return 0;
     }
 
-    function normalizeRecord(r, idx) {
+    // Пересечение двух интервалов времени в миллисекундах
+function overlapMs(aStart, aEnd, bStart, bEnd) {
+  const s = Math.max(aStart.getTime(), bStart.getTime());
+  const e = Math.min(aEnd.getTime(),   bEnd.getTime());
+  return Math.max(0, e - s);
+}
+
+// Сколько мс из [start, end] попадает в обеденный перерыв(ы)
+function lunchOverlapMs(start, end, lunchFrom = "13:00", lunchTo = "14:00") {
+  if (!(start instanceof Date) || !(end instanceof Date) || end <= start) return 0;
+
+  // распарсим "HH:MM"
+  const [fh, fm] = lunchFrom.split(":").map(n => parseInt(n, 10) || 0);
+  const [th, tm] = lunchTo.split(":").map(n => parseInt(n, 10) || 0);
+
+  // Итерация по дням, которые затрагивает интервал [start, end]
+  let total = 0;
+  // Начинаем с полуночи дня начала
+  let dayCursor = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0);
+
+  // Будем идти по суткам, пока день не превысит конец интервала
+  while (dayCursor.getTime() <= end.getTime()) {
+    // Окно обеда в рамках текущих суток
+    const lunchStart = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate(), fh, fm, 0, 0);
+    const lunchEnd   = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate(), th, tm, 0, 0);
+
+    // Пересечение рабочего интервала с обедом за эти сутки
+    total += overlapMs(start, end, lunchStart, lunchEnd);
+
+    // следующий день
+    dayCursor = new Date(dayCursor.getTime() + 24*3600*1000);
+  }
+  return total;
+}
+
+
+function normalizeRecord(r, idx) {
   // 1) базовый старт: "Дата и время"
   let start = cols.date ? excelDateToJS(r[cols.date]) : null;
 
@@ -316,30 +352,42 @@ function formatDurationWorkday(ms, WORKDAY_HOURS = 8) {
     }
   }
 
-  // 3) длительность из "Итоговое количество времени"
-  const rawDur = (cols.hours != null) ? r[cols.hours] : null;
-  let durMs = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
-
-  // 4) окончание
+  // 3) конец по данным
   let end = null;
-  if (start && durMs > 0) {
-    end = new Date(start.getTime() + durMs);
-  } else {
-    if (cols.startTime && !start) start = parseTime(r[cols.startTime]) || start;
-    if (cols.endTime) end = parseTime(r[cols.endTime]) || end;
-    if (cols.endDate && end instanceof Date) {
-      const dEnd = excelDateToJS(r[cols.endDate]);
-      if (dEnd) end = new Date(dEnd.getFullYear(), dEnd.getMonth(), dEnd.getDate(), end.getHours(), end.getMinutes(), end.getSeconds(), 0);
-    }
-    if (!durMs && start && end) {
-      durMs = Math.max(0, Math.round((end - start))); // точная длительность
+  if (cols.endTime || cols.endDate) {
+    // если есть отдельные поля окончания — соберём
+    const tOnly = cols.endTime ? parseTime(r[cols.endTime]) : null;
+    const dOnly = cols.endDate ? excelDateToJS(r[cols.endDate]) : (start ? new Date(start) : null);
+    if (tOnly || dOnly) {
+      const d = dOnly
+        ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
+        : new Date();
+      if (tOnly) d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
+      end = d;
     }
   }
 
-  // 5) итоговые поля
+  // 4) альтернативный источник — «Итоговое количество времени»
+  const rawDur = (cols.hours != null) ? r[cols.hours] : null;
+
+  // 5) финальная длительность
+  let durMs = 0;
+
+  if (start && end && end > start) {
+    // приоритет: считаем от/до и вычитаем обед(ы)
+    const base = end.getTime() - start.getTime();
+    const lunch = lunchOverlapMs(start, end, "13:00", "14:00");
+    durMs = Math.max(0, base - lunch);
+  } else if (rawDur != null && String(rawDur).trim() !== '') {
+    // если времени начала/окончания нет — используем «Итоговое кол-во»
+    durMs = parseDurationMs(rawDur);
+    // НЕТ корректной возможности вычитать обед без start/end, поэтому оставляем как есть
+  }
+
+  // 6) итоговые поля
   const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
   const event = r[cols.event] || '';
-  const hoursText = formatDurationRu(durMs);
+  const hoursText = formatDurationRu(durMs); // отображение строкой
 
   return {
     id: String(idx + 1),
@@ -348,10 +396,11 @@ function formatDurationWorkday(ms, WORKDAY_HOURS = 8) {
     start: start || null,
     end: end || null,
     durMs: durMs || 0,
-    hoursText,                 // "5 ч 15 мин"
-    source: r                  // опционально: исходная строка
+    hoursText,
+    source: r
   };
 }
+
 
 
     function withinPeriod(d) {
@@ -525,5 +574,6 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
 
