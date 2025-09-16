@@ -66,6 +66,9 @@
             <div>Сформировано: <span id="repGenerated"></span></div>
           </div>
         </div>
+        <div class="text-sm text-gray-600 mb-2 no-print">
+  В расчёте ниже «1&nbsp;день» = <b>8 часов</b>.
+        </div>
         <div class="overflow-x-auto">
           <table class="w-full border border-gray-200 report-table">
             <thead class="bg-gray-50">
@@ -80,17 +83,20 @@
             </thead>
             <tbody id="repTbody"></tbody>
 <tfoot>
-  <!-- Экран: 6 колонок -->
-  <tr class="sum-screen">
-    <td colspan="5" class="border p-2 text-right font-semibold">Итого часов:</td>
-    <td id="repTotalScreen" class="border p-2 text-right font-bold">0</td>
-  </tr>
+<tr class="sum-screen">
+  <td colspan="5" class="border p-2 text-right font-semibold">
+    Итого (раб. день = 8 ч):
+  </td>
+  <td id="repTotalScreen" class="border p-2 text-right font-bold">0</td>
+</tr>
 
-  <!-- Печать: 5 колонок (колонка # скрыта в thead/tbody) -->
-  <tr class="sum-print">
-    <td colspan="4" class="border p-2 text-right font-semibold">Итого часов:</td>
-    <td id="repTotalPrint" class="border p-2 text-right font-bold">0</td>
-  </tr>
+<tr class="sum-print">
+  <td colspan="4" class="border p-2 text-right font-semibold">
+    Итого (раб. день = 8 ч):
+  </td>
+  <td id="repTotalPrint" class="border p-2 text-right font-bold">0</td>
+</tr>
+
 </tfoot>
 
           </table>
@@ -217,6 +223,22 @@ function formatDurationRu(ms) {
   if (mins  > 0) parts.push(`${mins}\u00A0мин`);
 
   return parts.join(' ');
+}
+
+function formatDurationWorkday(ms, WORKDAY_HOURS = 8) {
+  if (!ms || ms <= 0) return '0 мин';
+  const totalMinutes = Math.round(ms / 60000);
+  const totalHours   = Math.floor(totalMinutes / 60);
+  const mins         = totalMinutes % 60;
+
+  const days  = Math.floor(totalHours / WORKDAY_HOURS);  // дни по 8 ч
+  const hours = totalHours % WORKDAY_HOURS;
+
+  const parts = [];
+  if (days  > 0) parts.push(`${days}\u00A0дн`);
+  if (hours > 0) parts.push(`${hours}\u00A0ч`);
+  if (mins  > 0) parts.push(`${mins}\u00A0мин`);
+  return parts.join(' ') || '0 мин';
 }
 
 
@@ -372,21 +394,21 @@ function formatDurationRu(ms) {
 
     // ===== Рендер отчёта =====
 function buildReport(fioVal){
-  if(!fioVal) return;
+  if (!fioVal) return;
 
   // фильтр по сотруднику и периоду
   let rows = records
     .filter(rec => rec.fio === fioVal)
     .filter(rec => withinPeriod(rec.start || rec.end || null));
 
-  // сортировка
+  // сортировка по дате
   rows.sort((a,b)=>{
     const ad = (a.start || a.end || 0)?.getTime?.() || 0;
     const bd = (b.start || b.end || 0)?.getTime?.() || 0;
     return ad - bd;
   });
 
-  // рендер
+  // рендер строк
   const tbody = document.getElementById('repTbody');
   tbody.innerHTML = '';
   let totalMs = 0;
@@ -395,7 +417,7 @@ function buildReport(fioVal){
     totalMs += (r.durMs || 0);
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="border p-2">${i+1}</td>
+      <td class="border p-2">${i + 1}</td>
       <td class="border p-2">${fmtDate(r.start || r.end)}</td>
       <td class="border p-2">${fmtTime(r.start)}</td>
       <td class="border p-2">${fmtTime(r.end)}</td>
@@ -405,29 +427,49 @@ function buildReport(fioVal){
     tbody.appendChild(tr);
   });
 
-  // ИТОГО (учитывает печать: colspan уже настроен в твоём tfoot)
-const totalText  = formatDurationRu(totalMs);
-const totalHours = (totalMs / 36e5).toFixed(2) + ' ч';
+  // ===== ИТОГО
+  const WORKDAY_HOURS = 8;
 
-const cellScreen = document.getElementById('repTotalScreen');
-const cellPrint  = document.getElementById('repTotalPrint');
-if (cellScreen) { cellScreen.textContent = totalText; cellScreen.title = totalHours; }
-if (cellPrint)  { cellPrint.textContent  = totalText; cellPrint.title  = totalHours; }
+  // по рабочим дням (8 ч/день)
+  const totalTextWork = formatDurationWorkday(totalMs, WORKDAY_HOURS);
 
-  // если у тебя один футер:
+  // «сырые» часы и представление по календарю (24 ч/день) — для подсказки
+  const totalHoursFloat = totalMs / 36e5;
+  const totalText24h    = formatDurationRu(totalMs);
+  const tooltip = [
+    `${totalHoursFloat.toFixed(2)} ч (сумма)`,
+    `${totalText24h} по календарю (24 ч/день)`,
+    `${totalTextWork} по рабочим дням (${WORKDAY_HOURS} ч/день)`
+  ].join(' · ');
+
+  const cellScreen = document.getElementById('repTotalScreen');
+  const cellPrint  = document.getElementById('repTotalPrint');
+
+  if (cellScreen) {
+    cellScreen.textContent = `${totalTextWork} (по ${WORKDAY_HOURS} ч/день)`;
+    cellScreen.title = tooltip;
+  }
+  if (cellPrint) {
+    cellPrint.textContent  = `${totalTextWork} (по ${WORKDAY_HOURS} ч/день)`;
+    cellPrint.title  = tooltip;
+  }
+
+  // поддержка альтернативного единственного футера (если есть)
   const repTotal = document.getElementById('repTotal');
-  if (repTotal) { repTotal.textContent = totalText; repTotal.title = totalHours; }
-
-
+  if (repTotal) {
+    repTotal.textContent = `${totalTextWork} (по ${WORKDAY_HOURS} ч/день)`;
+    repTotal.title = tooltip;
+  }
 
   // заголовки отчёта
   document.getElementById('repFio').textContent = fioVal;
-  const df=document.getElementById('dateFrom').value;
-  const dt=document.getElementById('dateTo').value;
+  const df = document.getElementById('dateFrom').value;
+  const dt = document.getElementById('dateTo').value;
   document.getElementById('repPeriod').textContent = (df && dt) ? `${df} — ${dt}` : (df || dt || 'все даты');
   document.getElementById('repGenerated').textContent = fmtDate(new Date());
   document.getElementById('reportWrap').classList.remove('hidden');
 }
+
 
 
     // ===== Загрузка файла
@@ -483,4 +525,5 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
