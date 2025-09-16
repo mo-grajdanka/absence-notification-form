@@ -393,7 +393,7 @@ function endByWorkMsWindowed(start, workMs, dayStart="09:00", lunchFrom="13:00",
 
 
 function normalizeRecord(r, idx) {
-  // ---- 1) распарсить старт ----
+  // ---- 1) старт ----
   let start = cols.date ? excelDateToJS(r[cols.date]) : null;
 
   if (!start && (cols.startDate || cols.startTime)) {
@@ -408,8 +408,10 @@ function normalizeRecord(r, idx) {
     }
   }
 
-  // ---- 2) распарсить конец (если задан) ----
+  // ---- 2) конец ----
   let end = null;
+
+  // (а) пробуем обычную сборку конца (дата завершения либо дата старта)
   if (cols.endTime || cols.endDate) {
     const tOnly = cols.endTime ? parseTime(r[cols.endTime]) : null;
     const dOnly = cols.endDate ? excelDateToJS(r[cols.endDate]) : (start ? new Date(start) : null);
@@ -422,7 +424,29 @@ function normalizeRecord(r, idx) {
     }
   }
 
-  // ---- 3) «Итоговое количество времени» (как число мс) ----
+  // (б) если по ячейкам явно заданы и начало, и окончание времени — собираем конец на дате старта,
+  //     даже если не нашлась "Дата завершения"
+  const hasStartTimeCell = !!(cols.startTime && r[cols.startTime]);
+  const hasEndTimeCell   = !!(cols.endTime   && r[cols.endTime]);
+  if (!end && start && hasStartTimeCell && hasEndTimeCell) {
+    const tEnd = parseTime(r[cols.endTime]);
+    if (tEnd) {
+      end = new Date(start.getFullYear(), start.getMonth(), start.getDate(),
+                     tEnd.getHours(), tEnd.getMinutes(), tEnd.getSeconds(), 0);
+    }
+  }
+
+  // (в) защита от "end <= start" (например, если время распарсилось с другой датой)
+  if (start && end && end <= start) {
+    const h = end.getHours(), m = end.getMinutes(), s = end.getSeconds();
+    end = new Date(start.getFullYear(), start.getMonth(), start.getDate(), h, m, s, 0);
+    if (end <= start) {
+      // если всё ещё не ок (например, конец раньше начала), сдвинем на +1 день
+      end = new Date(end.getTime() + 24*3600*1000);
+    }
+  }
+
+  // ---- 3) "Итоговое кол-во времени" ----
   const rawDur = (cols.hours != null) ? r[cols.hours] : null;
   const durByRaw = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
 
@@ -430,19 +454,18 @@ function normalizeRecord(r, idx) {
   let durMs = 0;
 
   if (start && end && end > start) {
-    // приоритет №1: явные от/до → считаем ТОЛЬКО рабочие окна
+    // №1: если есть от/до — считаем ТОЛЬКО рабочие окна (09–13 и 14–18)
     durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
   } else if (start && durByRaw > 0) {
-    // приоритет №2: есть старт и «итоговое» → строим конец по рабочим окнам
+    // №2: есть старт и "итоговое" — строим конец по рабочим окнам
     end = endByWorkMsWindowed(start, durByRaw, "09:00", "13:00", "14:00", "18:00");
     durMs = durByRaw;
   } else {
-    // приоритет №3: только «итоговое»
+    // №3: только "итоговое"
     durMs = durByRaw;
-    // end не восстанавливаем — данных мало
+    // end не восстанавливаем — данных недостаточно
   }
 
-  // ---- 5) возврат записи ----
   const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
   const event = r[cols.event] || '';
   const hoursText = formatDurationRu(durMs);
@@ -458,6 +481,7 @@ function normalizeRecord(r, idx) {
     source: r
   };
 }
+
 
 
 
@@ -633,6 +657,7 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
 
 
