@@ -390,6 +390,51 @@ function endByWorkMsWindowed(start, workMs, dayStart="09:00", lunchFrom="13:00",
   return new Date(hi);
 }
 
+function endByWorkMsSameDay(start, workMs, dayStart="09:00", lunchFrom="13:00", lunchTo="14:00", dayEnd="18:00"){
+  if(!(start instanceof Date) || !workMs || workMs<=0) return null;
+
+  // границы рабочего дня для даты старта
+  const [dsh,dsm] = (dayStart||"09:00").split(":").map(n=>parseInt(n,10)||0);
+  const [lfh,lfm] = (lunchFrom||"13:00").split(":").map(n=>parseInt(n,10)||0);
+  const [lth,ltm] = (lunchTo||"14:00").split(":").map(n=>parseInt(n,10)||0);
+  const [deh,dem] = (dayEnd||"18:00").split(":").map(n=>parseInt(n,10)||0);
+
+  const day = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0,0,0,0);
+  const ds  = new Date(day.getFullYear(), day.getMonth(), day.getDate(), dsh,dsm,0,0); // 09:00
+  const lf  = new Date(day.getFullYear(), day.getMonth(), day.getDate(), lfh,lfm,0,0); // 13:00
+  const lt  = new Date(day.getFullYear(), day.getMonth(), day.getDate(), lth,ltm,0,0); // 14:00
+  const de  = new Date(day.getFullYear(), day.getMonth(), day.getDate(), deh,dem,0,0); // 18:00
+
+  // набираем рабочее время, не выходя за пределы дня
+  let remain = workMs;
+  let cur = new Date(start);
+
+  // участок до обеда
+  if (remain > 0) {
+    const segStart = cur < ds ? ds : cur;
+    const segEnd   = lf;
+    if (segStart < segEnd) {
+      const take = Math.min(remain, Math.max(0, segEnd - segStart));
+      remain -= take;
+      cur = new Date(segStart.getTime() + take);
+    }
+  }
+  // участок после обеда
+  if (remain > 0) {
+    if (cur < lt) cur = lt;
+    const segStart = cur;
+    const segEnd   = de;
+    if (segStart < segEnd) {
+      const take = Math.min(remain, Math.max(0, segEnd - segStart));
+      remain -= take;
+      cur = new Date(segStart.getTime() + take);
+    }
+  }
+
+  // если не уместилось — вернём 18:00 текущего дня (без переноса)
+  if (remain > 0) return de;
+  return cur;
+}
 
 
 function normalizeRecord(r, idx) {
@@ -451,35 +496,38 @@ function normalizeRecord(r, idx) {
   const durByRaw = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
 
   // ---- 4) финальный расчёт по приоритетам ----
-  let durMs = 0;
+let durMs = 0;
 
-  if (start && end && end > start) {
-    // №1: если есть от/до — считаем ТОЛЬКО рабочие окна (09–13 и 14–18)
-    durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
-  } else if (start && durByRaw > 0) {
-    // №2: есть старт и "итоговое" — строим конец по рабочим окнам
-    end = endByWorkMsWindowed(start, durByRaw, "09:00", "13:00", "14:00", "18:00");
-    durMs = durByRaw;
-  } else {
-    // №3: только "итоговое"
-    durMs = durByRaw;
-    // end не восстанавливаем — данных недостаточно
-  }
+if (start && end && end > start) {
+  // №1: если есть от/до — считаем ТОЛЬКО рабочие окна (09–13 и 14–18)
+  durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
+} else if (start && durByRaw > 0) {
+  // №2: есть старт и «итоговое» — строим конец в пределах ТЕКУЩЕГО дня (без переноса)
+  end = endByWorkMsSameDay(start, durByRaw, "09:00", "13:00", "14:00", "18:00");
+  // фактически уместившееся рабочее время в этот день:
+  const fitted = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
+  // показываем «часы» как уместившееся (не больше 8ч за день)
+  durMs = Math.min(durByRaw, fitted);
+} else {
+  // №3: только «итоговое»
+  durMs = durByRaw;
+  // end не восстанавливаем — данных недостаточно
+}
 
-  const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
-  const event = r[cols.event] || '';
-  const hoursText = formatDurationRu(durMs);
+const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
+const event = r[cols.event] || '';
+const hoursText = formatDurationRu(durMs);
 
-  return {
-    id: String(idx + 1),
-    fio,
-    event,
-    start: start || null,
-    end: end || null,
-    durMs: durMs || 0,
-    hoursText,
-    source: r
-  };
+return {
+  id: String(idx + 1),
+  fio,
+  event,
+  start: start || null,
+  end: end || null,
+  durMs: durMs || 0,
+  hoursText,
+  source: r
+};
 }
 
 
@@ -657,6 +705,7 @@ document.getElementById('btnPrint').disabled = false;
   </script>
 </body>
 </html>
+
 
 
 
