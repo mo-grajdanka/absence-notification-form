@@ -109,6 +109,29 @@
 
   <script>
 
+function clipToSelectedPeriod(start, end) {
+  if (!start && !end) return { start: null, end: null };
+
+  const f = getPickerDateLocal('dateFrom');
+  const t = getPickerDateLocal('dateTo');
+
+  let s = start || end;
+  let e = end || start;
+
+  if (!s && !e) return { start: null, end: null };
+
+  const tEnd = t
+    ? new Date(t.getFullYear(), t.getMonth(), t.getDate(), 23, 59, 59, 999)
+    : null;
+
+  if (f && s < f) s = new Date(f);
+  if (tEnd && e > tEnd) e = new Date(tEnd);
+
+  if (e < s) return { start: null, end: null };
+
+  return { start: s || null, end: e || null };
+}
+
 function readSmart(ws){
   const rows = XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:true});
   if(!rows.length) return {headers:[], data:[]};
@@ -348,11 +371,6 @@ function lunchOverlapMs(start, end, lunchFrom = "13:00", lunchTo = "14:00") {
   return end;
 }
 
-    function overlapMs(aStart, aEnd, bStart, bEnd) {
-  const s = Math.max(aStart.getTime(), bStart.getTime());
-  const e = Math.min(aEnd.getTime(),   bEnd.getTime());
-  return Math.max(0, e - s);
-}
 
 function parseHM(s){ const [h,m]=String(s).split(':'); return [parseInt(h||'0',10), parseInt(m||'0',10)]; }
 
@@ -379,14 +397,25 @@ function workOverlapMs(start, end, dayStart="09:00", lunchFrom="13:00", lunchTo=
 
 // Найти минимальное end так, чтобы рабочее время = workMs (учитывая окна)
 function endByWorkMsWindowed(start, workMs, dayStart="09:00", lunchFrom="13:00", lunchTo="14:00", dayEnd="18:00"){
-  if(!(start instanceof Date) || !workMs || workMs<=0) return null;
+  if (!(start instanceof Date) || !workMs || workMs <= 0) return null;
+
+  // верхняя граница с большим запасом:
+  // на каждые 8 рабочих часов даём примерно 1 сутки + запас
+  const approxDays = Math.max(1, Math.ceil(workMs / (8 * 3600 * 1000)));
   let lo = start.getTime();
-  let hi = lo + workMs + 3*86400000; // запас до 3 суток
-  for(let i=0;i<35;i++){
-    const mid = new Date(lo + Math.floor((hi-lo)/2));
+  let hi = lo + (approxDays + 7) * 86400000;
+
+  for (let i = 0; i < 50; i++) {
+    const mid = new Date(lo + Math.floor((hi - lo) / 2));
     const w = workOverlapMs(start, mid, dayStart, lunchFrom, lunchTo, dayEnd);
-    if (w >= workMs) hi = mid.getTime(); else lo = mid.getTime()+1;
+
+    if (w >= workMs) {
+      hi = mid.getTime();
+    } else {
+      lo = mid.getTime() + 1;
+    }
   }
+
   return new Date(hi);
 }
 
@@ -438,139 +467,242 @@ function endByWorkMsSameDay(start, workMs, dayStart="09:00", lunchFrom="13:00", 
 
 
 function normalizeRecord(r, idx) {
-  // ---- 1) старт ----
-  let start = cols.date ? excelDateToJS(r[cols.date]) : null;
-
-  if (!start && (cols.startDate || cols.startTime)) {
-    const dOnly = cols.startDate ? excelDateToJS(r[cols.startDate]) : null;
-    const tOnly = cols.startTime ? parseTime(r[cols.startTime]) : null;
-    if (dOnly || tOnly) {
-      const d = dOnly
-        ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
-        : new Date();
-      if (tOnly) d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
-      start = d;
-    }
+  function hasValue(v) {
+    return v !== null && v !== undefined && String(v).trim() !== '';
   }
 
-  // ---- 2) конец ----
+  function combineDateTime(dateVal, timeVal) {
+    const dOnly = hasValue(dateVal) ? excelDateToJS(dateVal) : null;
+    const tOnly = hasValue(timeVal) ? parseTime(timeVal) : null;
+
+    if (!dOnly && !tOnly) return null;
+
+    const d = dOnly
+      ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
+      : new Date();
+
+    if (tOnly) {
+      d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
+    }
+
+    return d;
+  }
+
+  let start = null;
   let end = null;
 
-  // (а) пробуем обычную сборку конца (дата завершения либо дата старта)
-  if (cols.endTime || cols.endDate) {
-    const tOnly = cols.endTime ? parseTime(r[cols.endTime]) : null;
-    const dOnly = cols.endDate ? excelDateToJS(r[cols.endDate]) : (start ? new Date(start) : null);
-    if (tOnly || dOnly) {
-      const d = dOnly
-        ? new Date(dOnly.getFullYear(), dOnly.getMonth(), dOnly.getDate(), 0, 0, 0, 0)
-        : new Date();
-      if (tOnly) d.setHours(tOnly.getHours(), tOnly.getMinutes(), tOnly.getSeconds(), 0);
-      end = d;
-    }
-  }
+  // 1. ПРИОРИТЕТ: отдельные поля
+  const startSeparate = combineDateTime(
+    cols.startDate ? r[cols.startDate] : null,
+    cols.startTime ? r[cols.startTime] : null
+  );
 
-  // (б) если по ячейкам явно заданы и начало, и окончание времени — собираем конец на дате старта,
-  //     даже если не нашлась "Дата завершения"
-  const hasStartTimeCell = !!(cols.startTime && r[cols.startTime]);
-  const hasEndTimeCell   = !!(cols.endTime   && r[cols.endTime]);
-  if (!end && start && hasStartTimeCell && hasEndTimeCell) {
-    const tEnd = parseTime(r[cols.endTime]);
-    if (tEnd) {
-      end = new Date(start.getFullYear(), start.getMonth(), start.getDate(),
-                     tEnd.getHours(), tEnd.getMinutes(), tEnd.getSeconds(), 0);
-    }
-  }
+  const endSeparate = combineDateTime(
+    cols.endDate ? r[cols.endDate] : (cols.startDate ? r[cols.startDate] : null),
+    cols.endTime ? r[cols.endTime] : null
+  );
 
-  // (в) защита от "end <= start" (например, если время распарсилось с другой датой)
+  // 2. FALLBACK: объединённые дата+время
+  const startCombined = (cols.startDT && hasValue(r[cols.startDT]))
+    ? excelDateToJS(r[cols.startDT])
+    : null;
+
+  const endCombined = (cols.endDT && hasValue(r[cols.endDT]))
+    ? excelDateToJS(r[cols.endDT])
+    : null;
+
+  start = startSeparate || startCombined || null;
+  end   = endSeparate   || endCombined   || null;
+
+  // 3. Если окончание получилось раньше начала — пробуем починить
   if (start && end && end <= start) {
-    const h = end.getHours(), m = end.getMinutes(), s = end.getSeconds();
-    end = new Date(start.getFullYear(), start.getMonth(), start.getDate(), h, m, s, 0);
+    // если у конца только время без корректной даты — ставим дату начала
+    end = new Date(
+      start.getFullYear(),
+      start.getMonth(),
+      start.getDate(),
+      end.getHours(),
+      end.getMinutes(),
+      end.getSeconds(),
+      0
+    );
+
+    // если всё равно раньше — сдвигаем на сутки
     if (end <= start) {
-      // если всё ещё не ок (например, конец раньше начала), сдвинем на +1 день
-      end = new Date(end.getTime() + 24*3600*1000);
+      end = new Date(end.getTime() + 24 * 3600 * 1000);
     }
   }
 
-  // ---- 3) "Итоговое кол-во времени" ----
+  // 4. Длительность
   const rawDur = (cols.hours != null) ? r[cols.hours] : null;
-  const durByRaw = (rawDur != null && String(rawDur).trim() !== '') ? parseDurationMs(rawDur) : 0;
+  const durByRaw = hasValue(rawDur) ? parseDurationMs(rawDur) : 0;
 
-  // ---- 4) финальный расчёт по приоритетам ----
-let durMs = 0;
+  let durMs = 0;
 
-if (start && end && end > start) {
-  // №1: если есть от/до — считаем ТОЛЬКО рабочие окна (09–13 и 14–18)
+  if (start && end && end > start) {
+    durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
+  } else if (start && durByRaw > 0) {
+  end = endByWorkMsWindowed(start, durByRaw, "09:00", "13:00", "14:00", "18:00");
   durMs = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
-} else if (start && durByRaw > 0) {
-  // №2: есть старт и «итоговое» — строим конец в пределах ТЕКУЩЕГО дня (без переноса)
-  end = endByWorkMsSameDay(start, durByRaw, "09:00", "13:00", "14:00", "18:00");
-  // фактически уместившееся рабочее время в этот день:
-  const fitted = workOverlapMs(start, end, "09:00", "13:00", "14:00", "18:00");
-  // показываем «часы» как уместившееся (не больше 8ч за день)
-  durMs = Math.min(durByRaw, fitted);
 } else {
-  // №3: только «итоговое»
-  durMs = durByRaw;
-  // end не восстанавливаем — данных недостаточно
-}
+    durMs = durByRaw;
+  }
 
-const fio   = String(r[cols.fio]||'').replace(/\u00A0/g,' ').trim();
-const event = r[cols.event] || '';
-const hoursText = formatDurationRu(durMs);
+  const fio   = String(r[cols.fio] || '').replace(/\u00A0/g, ' ').trim();
+  const event = String(r[cols.event] || '').trim();
 
-return {
-  id: String(idx + 1),
-  fio,
-  event,
-  start: start || null,
-  end: end || null,
-  durMs: durMs || 0,
-  hoursText,
-  source: r
-};
+  return {
+    id: String(idx + 1),
+    fio,
+    event,
+    start: start || null,
+    end: end || null,
+    durMs: durMs || 0,
+    hoursText: formatDurationRu(durMs),
+    source: r
+  };
 }
 
 
 
 
 
-    function withinPeriod(d) {
-  if (!d) return false;
+function withinPeriodRange(start, end) {
+  const f = getPickerDateLocal('dateFrom');
+  const t = getPickerDateLocal('dateTo');
 
-  const f = getPickerDateLocal('dateFrom'); // начало периода (local)
-  const t = getPickerDateLocal('dateTo');   // конец периода (local)
+  if (!start && !end) return false;
 
-  // сравниваем только по дате (локальная полночь)
-  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  const s = start
+    ? new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0)
+    : (end ? new Date(end.getFullYear(), end.getMonth(), end.getDate(), 0, 0, 0, 0) : null);
 
-  if (f && day < f) return false;  // ВКЛЮЧИТЕЛЬНО: day === f проходит
-  if (t && day > t) return false;  // ВКЛЮЧИТЕЛЬНО: day === t проходит
+  const e = end
+    ? new Date(end.getFullYear(), end.getMonth(), end.getDate(), 0, 0, 0, 0)
+    : s;
+
+  if (f && e < f) return false;
+  if (t && s > t) return false;
+
   return true;
 }
 
     // ===== Поиск колонок по синонимам =====
-    function detectColumns(headers){
-      const norm = s => String(s||'').toLowerCase().replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim();
-      const find = (cands)=>{
-        for(const c of cands){ const hit=headers.find(h=>norm(h)===norm(c)); if(hit) return hit; }
-        const keys=[...cands].sort((a,b)=>b.length-a.length).map(norm);
-        for(const h of headers){ const nh=norm(h); if(keys.some(k=>nh.includes(k))) return h; }
-        return null;
-      };
-      const res = {
-        fio:       find(['ФИО','Сотрудник','ФИО сотрудника','Фамилия Имя','Фамилия, имя и отчество','Name','Employee','Full Name']),
-        event:     find(['Событие','Причина','Тип события','Описание','Комментарий','Event','Reason','Description']),
-        date:      find(['Дата и время','Дата','Дата создания','Date','Created','Creation Date']),
-        startDate: find(['Дата начала','Start Date','Начало (дата)']),
-        startTime: find(['Время начала','Начало','Start','Start Time']),
-        endDate:   find(['Дата завершения','End Date','Окончание (дата)']),
-        endTime:   find(['Время завершения','Окончание','End','End Time','Finish']),
-        hours:     find(['Итоговое количество времени','Количество времени','Часы','Длительность','Продолжительность','Hours','Duration'])
-      };
-      res.start = res.startTime; // для совместимости
-      res.end   = res.endTime;
-      return res;
+function detectColumns(headers){
+  const norm = s => String(s || '')
+    .toLowerCase()
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  function findExact(list){
+    for (const cand of list) {
+      const hit = headers.find(h => norm(h) === norm(cand));
+      if (hit) return hit;
     }
+    return null;
+  }
+
+  function findIncludes(list, exclude = []){
+    for (const cand of list) {
+      for (const h of headers) {
+        const nh = norm(h);
+        if (
+          nh.includes(norm(cand)) &&
+          !exclude.some(x => nh.includes(norm(x)))
+        ) {
+          return h;
+        }
+      }
+    }
+    return null;
+  }
+
+  const res = {
+    fio: findExact([
+      'ФИО',
+      'Сотрудник',
+      'ФИО сотрудника',
+      'Фамилия Имя',
+      'Фамилия, имя и отчество',
+      'Name',
+      'Employee',
+      'Full Name'
+    ]) || findIncludes(['фио', 'сотрудник', 'employee', 'name']),
+
+    event: findExact([
+      'Событие',
+      'Причина',
+      'Тип события',
+      'Описание',
+      'Комментарий',
+      'Event',
+      'Reason',
+      'Description'
+    ]) || findIncludes(['событие', 'причина', 'тип события', 'описание', 'comment']),
+
+    startDT: findExact([
+      'Дата и время: начало',
+      'Дата и время начала'
+    ]) || findIncludes([
+      'дата и время: начало',
+      'дата и время начала'
+    ]),
+
+    endDT: findExact([
+      'Дата и время: окончание',
+      'Дата и время окончания'
+    ]) || findIncludes([
+      'дата и время: окончание',
+      'дата и время окончания'
+    ]),
+
+    startDate: findExact([
+      'Дата начала',
+      'Start Date',
+      'Начало (дата)'
+    ]) || findIncludes(['дата начала']),
+
+    startTime: findExact([
+      'Время начала',
+      'Start Time'
+    ]) || findIncludes(['время начала']),
+
+    endDate: findExact([
+      'Дата завершения',
+      'End Date',
+      'Окончание (дата)'
+    ]) || findIncludes(['дата завершения', 'дата окончания']),
+
+    endTime: findExact([
+      'Время завершения',
+      'End Time',
+      'Finish Time'
+    ]) || findIncludes(['время завершения', 'время окончания']),
+
+    hours: findExact([
+      'Итоговое количество времени',
+      'Количество времени',
+      'Часы',
+      'Длительность',
+      'Продолжительность',
+      'Hours',
+      'Duration'
+    ]) || findIncludes([
+      'итоговое количество времени',
+      'количество времени',
+      'часы',
+      'длительность',
+      'продолжительность',
+      'duration'
+    ])
+  };
+
+  res.start = res.startTime;
+  res.end = res.endTime;
+
+  return res;
+}
 
     // ===== Рендер отчёта =====
 function buildReport(fioVal){
@@ -579,7 +711,7 @@ function buildReport(fioVal){
   // фильтр по сотруднику и периоду
   let rows = records
     .filter(rec => rec.fio === fioVal)
-    .filter(rec => withinPeriod(rec.start || rec.end || null));
+    .filter(rec => withinPeriodRange(rec.start, rec.end));
 
   // сортировка по дате
   rows.sort((a,b)=>{
@@ -589,23 +721,31 @@ function buildReport(fioVal){
   });
 
   // рендер строк
-  const tbody = document.getElementById('repTbody');
-  tbody.innerHTML = '';
-  let totalMs = 0;
+const tbody = document.getElementById('repTbody');
+tbody.innerHTML = '';
+let totalMs = 0;
 
-  rows.forEach((r, i) => {
-    totalMs += (r.durMs || 0);
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="border p-2">${i + 1}</td>
-      <td class="border p-2">${fmtDate(r.start || r.end)}</td>
-      <td class="border p-2">${fmtTime(r.start)}</td>
-      <td class="border p-2">${fmtTime(r.end)}</td>
-      <td class="border p-2">${r.event}</td>
-      <td class="border p-2 text-right" title="${(r.durMs/36e5).toFixed(2)} ч">${r.hoursText}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+rows.forEach((r, i) => {
+  const clipped = clipToSelectedPeriod(r.start, r.end);
+
+let rowDurMs = 0;
+if (clipped.start && clipped.end) {
+  rowDurMs = workOverlapMs(clipped.start, clipped.end, "09:00", "13:00", "14:00", "18:00");
+}
+
+  totalMs += rowDurMs;
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td class="border p-2">${i + 1}</td>
+    <td class="border p-2">${fmtDate(clipped.start || r.start || r.end)}</td>
+    <td class="border p-2">${fmtTime(clipped.start || r.start)}</td>
+    <td class="border p-2">${fmtTime(clipped.end || r.end)}</td>
+    <td class="border p-2">${r.event}</td>
+    <td class="border p-2 text-right" title="${(rowDurMs/36e5).toFixed(2)} ч">${formatDurationRu(rowDurMs)}</td>
+  `;
+  tbody.appendChild(tr);
+});
 
   // ===== ИТОГО
   const WORKDAY_HOURS = 8;
@@ -681,18 +821,26 @@ document.getElementById('btnPrint').disabled = false;
 
         const det=document.getElementById('detectedCols');
         det.innerHTML = 'Опознаны колонки: ' + [
-          `ФИО: <b>${cols.fio||'—'}</b>`,
-          `Событие: <b>${cols.event||'—'}</b>`,
-          `Дата/время: <b>${cols.date||'—'}</b>`,
-          `Старт‑дата: <b>${cols.startDate||'—'}</b>`,
-          `Старт‑время: <b>${cols.startTime||'—'}</b>`,
-          `Финиш‑дата: <b>${cols.endDate||'—'}</b>`,
-          `Финиш‑время: <b>${cols.endTime||'—'}</b>`,
-          `Длительность: <b>${cols.hours||'—'}</b>`
-        ].join(' · ');
+  `ФИО: <b>${cols.fio || '—'}</b>`,
+  `Событие: <b>${cols.event || '—'}</b>`,
+  `Дата+время начала: <b>${cols.startDT || '—'}</b>`,
+  `Дата+время окончания: <b>${cols.endDT || '—'}</b>`,
+  `Дата начала: <b>${cols.startDate || '—'}</b>`,
+  `Время начала: <b>${cols.startTime || '—'}</b>`,
+  `Дата завершения: <b>${cols.endDate || '—'}</b>`,
+  `Время завершения: <b>${cols.endTime || '—'}</b>`,
+  `Длительность: <b>${cols.hours || '—'}</b>`
+].join(' · ');
 
-        if(!cols.fio){ showToast('Не нашёл колонку ФИО/Сотрудник — проверьте шапку файла.','err'); return; }
-        if(!(cols.date || cols.startDate)){ showToast('Не нашёл «Дата и время» или «Дата начала».','err'); return; }
+if (!cols.fio) {
+  showToast('Не нашёл колонку ФИО/Сотрудник — проверьте шапку файла.', 'err');
+  return;
+}
+
+if (!(cols.startDT || cols.startDate || cols.startTime)) {
+  showToast('Не нашёл поля начала: ни «Дата и время: начало», ни «Дата начала/Время начала».', 'err');
+  return;
+}
 
         showToast('Файл загружен, выберите сотрудника.');
       }catch(err){ console.error(err); showToast('Ошибка: '+err.message,'err'); }
