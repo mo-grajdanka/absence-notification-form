@@ -707,7 +707,20 @@ function detectColumns(headers){
 
     // ===== Рендер отчёта =====
 function buildReport(fioVal){
-  if (!fioVal) return;
+
+  if (!fioVal) {
+    document.getElementById('repTbody').innerHTML = '';
+    document.getElementById('repFio').textContent = '';
+    document.getElementById('repPeriod').textContent = '—';
+    document.getElementById('repGenerated').textContent = '';
+    document.getElementById('repTotalScreen').textContent = '0';
+    document.getElementById('repTotalPrint').textContent = '0';
+    document.getElementById('repTotalScreen').removeAttribute('title');
+    document.getElementById('repTotalPrint').removeAttribute('title');
+    document.getElementById('reportWrap').classList.add('hidden');
+    return;
+  }
+  
 
   // фильтр по сотруднику и периоду
   let rows = records
